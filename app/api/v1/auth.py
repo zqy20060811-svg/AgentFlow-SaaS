@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -57,14 +58,26 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
 
 
-@router.post("/login", response_model=TokenOut)
-def login(payload: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
-    if not user or not verify_password(payload.password, user.hashed_password):
+def _authenticate(db: Session, email: str, password: str) -> User:
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="账号已被禁用")
+    return user
 
+
+@router.post("/login", response_model=TokenOut)
+def login(payload: UserLogin, db: Session = Depends(get_db)):
+    user = _authenticate(db, payload.email, payload.password)
+    token = create_access_token({"sub": str(user.id)})
+    return TokenOut(access_token=token, user=UserOut.model_validate(user))
+
+
+@router.post("/token", response_model=TokenOut, include_in_schema=False)
+def login_for_docs(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    """OAuth2 表单登录，专供 Swagger UI 的 Authorize 按钮使用，username 填邮箱"""
+    user = _authenticate(db, form_data.username, form_data.password)
     token = create_access_token({"sub": str(user.id)})
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
 
