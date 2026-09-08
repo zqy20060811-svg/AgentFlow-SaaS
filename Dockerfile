@@ -9,8 +9,9 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # 先装依赖（利用 Docker 层缓存：代码变更不触发重装）
+# 使用清华 PyPI 镜像：海外源在国内服务器构建时经常超时
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 再拷代码
 COPY alembic.ini ./
