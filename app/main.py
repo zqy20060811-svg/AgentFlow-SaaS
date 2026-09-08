@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import auth, health
+from app.api.v1 import auth, generate, health, stream
 
-app = FastAPI(title="AgentFlow-SaaS", version="0.2.0")
+app = FastAPI(title="AgentFlow-SaaS", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,3 +15,5 @@ app.add_middleware(
 
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(generate.router, prefix="/api/v1")
+app.include_router(stream.router, prefix="/api/v1")

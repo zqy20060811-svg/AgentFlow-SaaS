@@ -3,6 +3,9 @@
 Agent A（retrieve）：Function Calling 循环——LLM 自主决定搜索关键词
 Agent B（generate）：按平台人设生成文案，支持根据质检反馈重写
 Agent C（review）  ：合规质检，LLM 的结构化结论驱动流程路由
+
+每个节点通过 LangGraph 的 configurable 拿到 on_event 回调，
+把"思考步骤"实时发出去（P3：Celery 任务传 Redis 发布函数）。
 """
 import json
 import logging
@@ -50,11 +53,23 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+def _notify(config: dict, event: str, data: dict) -> None:
+    """从 LangGraph configurable 中取 on_event 回调并触发（没有则忽略）。"""
+    on_event = (config or {}).get("configurable", {}).get("on_event")
+    if on_event:
+        try:
+            on_event(event, data)
+        except Exception:  # 事件推送失败不阻断主流程
+            logger.exception("on_event 回调执行失败")
+
+
 # ---------------------------------------------------------------- Agent A
-def agent_a_retrieve(state: PipelineState) -> dict:
+def agent_a_retrieve(state: PipelineState, config: dict = None) -> dict:
     """热点检索：bind_tools 让 LLM 自主规划搜索，收集结果后提炼要点。"""
     topic = state["topic"]
     print(f"[Agent A] 开始检索热点：{topic}")
+    _notify(config, "agent_start",
+            {"agent": "A", "message": f"开始检索热点：{topic}"})
 
     llm = get_llm(temperature=0.3).bind_tools([search_hotspots])
     messages = [
@@ -63,6 +78,7 @@ def agent_a_retrieve(state: PipelineState) -> dict:
     ]
 
     sources: list[dict] = []
+    ai_msg = None
     for round_no in range(MAX_TOOL_ROUNDS):
         ai_msg = llm.invoke(messages)
         messages.append(ai_msg)
@@ -71,6 +87,8 @@ def agent_a_retrieve(state: PipelineState) -> dict:
             break
 
         for tc in ai_msg.tool_calls:
+            query = tc["args"].get("query", "")
+            _notify(config, "tool_call", {"agent": "A", "query": query})
             raw = search_hotspots.invoke(tc["args"])
             messages.append(ToolMessage(content=raw, tool_call_id=tc["id"]))
             try:
@@ -85,12 +103,15 @@ def agent_a_retrieve(state: PipelineState) -> dict:
     hotspots_text = (ai_msg.content or "").strip()
     print(f"[Agent A] 完成，提炼 {len(hotspots_text.splitlines())} 条要点，"
           f"来源 {len(sources)} 个")
+    _notify(config, "agent_done",
+            {"agent": "A", "message": f"检索完成，收集到 {len(sources)} 个来源",
+             "source_count": len(sources)})
 
     return {"hotspots": [hotspots_text], "sources": sources}
 
 
 # ---------------------------------------------------------------- Agent B
-def agent_b_generate(state: PipelineState) -> dict:
+def agent_b_generate(state: PipelineState, config: dict = None) -> dict:
     """文案生成：按平台人设生成结构化草稿；若有质检反馈则针对性重写。"""
     topic = state["topic"]
     platform = state["platform"]
@@ -99,8 +120,13 @@ def agent_b_generate(state: PipelineState) -> dict:
 
     if feedback:
         print(f"[Agent B] 第 {rewrite_count} 次重写（质检意见：{feedback[:50]}...）")
+        _notify(config, "agent_start",
+                {"agent": "B", "message": f"第 {rewrite_count} 次重写",
+                 "rewrite": rewrite_count})
     else:
         print(f"[Agent B] 开始生成 {platform} 平台文案")
+        _notify(config, "agent_start",
+                {"agent": "B", "message": f"开始生成 {platform} 平台文案"})
 
     style = PLATFORM_STYLES[platform]
     hotspots_text = "\n".join(state.get("hotspots", []))
@@ -132,14 +158,19 @@ def agent_b_generate(state: PipelineState) -> dict:
         draft = _extract_json(resp.content)
 
     print(f"[Agent B] 完成《{draft.get('title', '')[:30]}》")
+    _notify(config, "agent_done",
+            {"agent": "B", "message": f"草稿完成：《{draft.get('title', '')[:30]}》",
+             "title": draft.get("title", "")})
     return {"draft": draft}
 
 
 # ---------------------------------------------------------------- Agent C
-def agent_c_review(state: PipelineState) -> dict:
+def agent_c_review(state: PipelineState, config: dict = None) -> dict:
     """质检审校：LLM 输出结构化结论，驱动 conditional_edges 路由。"""
     draft = state["draft"]
     print(f"[Agent C] 审校《{draft.get('title', '')[:30]}》")
+    _notify(config, "agent_start",
+            {"agent": "C", "message": "质检审校中"})
 
     user_prompt = f"""待审校文案：
 标题：{draft.get("title", "")}
@@ -168,6 +199,9 @@ def agent_c_review(state: PipelineState) -> dict:
         print("[Agent C] ✅ 质检通过")
     else:
         print(f"[Agent C] ❌ 未通过（{len(issues)} 个问题），打回重写")
+    _notify(config, "review_result",
+            {"agent": "C", "passed": passed, "issues": issues,
+             "feedback": feedback if not passed else ""})
 
     return {
         "review_passed": passed,

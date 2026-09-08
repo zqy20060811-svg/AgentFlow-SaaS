@@ -1,7 +1,9 @@
 """对外入口：run_pipeline(topic, platform)。
 
-P2 阶段直接同步调用即可在本地跑通；
-P3 会被 Celery 任务包裹，并把节点日志换成 SSE 事件推送。
+on_event(event, data) 回调让调用方拿到流水线中间步骤：
+- Celery 任务传入 Redis 发布函数 -> 实现实时推送（P3）
+- 测试脚本传入 print 包装      -> 本地观察
+不传则行为与 P2 一致（仅打印日志）。
 """
 import logging
 
@@ -12,15 +14,16 @@ from app.agents.state import PipelineState
 logger = logging.getLogger(__name__)
 
 
-def run_pipeline(topic: str, platform: str = "xiahs") -> dict:
+def run_pipeline(topic: str, platform: str = "xiahs",
+                 on_event=None) -> dict:
     """执行完整的多智能体流水线，返回最终产物。
 
     Args:
         topic: 营销主题，如 "AI无线耳机"
         platform: xiahs / wechat / linkedin / x
-
-    Returns:
-        {"title", "content", "tags", "sources", "review"} 结构的定稿
+        on_event: 可选回调 on_event(event: str, data: dict)，
+                  每个 Agent 步骤触发一次（通过 LangGraph
+                  configurable 透传给节点）。
     """
     if platform not in PLATFORM_STYLES:
         logger.warning("未知平台 %r，回退为 xiahs", platform)
@@ -34,11 +37,13 @@ def run_pipeline(topic: str, platform: str = "xiahs") -> dict:
         "draft": {},
         "review_passed": False,
         "review_feedback": "",
+        "issues": [],
         "rewrite_count": 0,
         "final_content": {},
     }
 
-    final = pipeline_app.invoke(init_state)
+    config = {"configurable": {"on_event": on_event}} if on_event else None
+    final = pipeline_app.invoke(init_state, config=config)
 
     draft = final.get("draft", {})
     result = {
