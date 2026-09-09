@@ -26,3 +26,5 @@ coverage.xml
 
 # Docker
 pg_data/
+
+docs/项目解析-自用.md
